@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.core.config import get_settings
+from app.db.migrate import run_migrations
 from app.db.session import Base, SessionLocal, engine
 from app.models import domain  # noqa: F401
 from app.services.seed import seed_database
@@ -15,7 +16,9 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        # Bootstrap schema for fresh DBs; Alembic applies additive changes (indexes, FKs).
         Base.metadata.create_all(bind=engine)
+        run_migrations()
         if settings.seed_on_startup:
             db = SessionLocal()
             try:

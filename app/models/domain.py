@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -107,6 +107,7 @@ class AdminUser(Base, TimestampMixin):
     position: Mapped[str] = mapped_column(String(120), default="Administrador", nullable=False)
     is_super_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    complex_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("residential_complexes.id"), nullable=True)
 
 
 class Resident(Base, TimestampMixin):
@@ -152,6 +153,7 @@ class Pet(Base, TimestampMixin):
 
 class CommonArea(Base, TimestampMixin):
     __tablename__ = "common_areas"
+    __table_args__ = (Index("ix_common_areas_complex_active", "complex_id", "is_active"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     complex_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("residential_complexes.id"), nullable=False)
@@ -165,6 +167,10 @@ class CommonArea(Base, TimestampMixin):
 
 class Reservation(Base, TimestampMixin):
     __tablename__ = "reservations"
+    __table_args__ = (
+        Index("ix_reservations_area_times", "common_area_id", "starts_at", "ends_at"),
+        Index("ix_reservations_resident_status", "resident_id", "status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     resident_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("residents.id"), nullable=False)

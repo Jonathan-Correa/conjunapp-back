@@ -259,7 +259,14 @@ def dashboard(db: Session = Depends(get_db), current_admin: AdminUser = Depends(
     collected = Decimal(db.scalar(select(func.coalesce(func.sum(Invoice.paid_amount), 0))) or 0)
     overdue = Decimal(db.scalar(select(func.coalesce(func.sum(Invoice.total - Invoice.paid_amount), 0)).where(Invoice.status == InvoiceStatus.overdue)) or 0)
     delinquent_units = db.scalar(select(func.count(func.distinct(Invoice.unit_id))).where(Invoice.status == InvoiceStatus.overdue)) or 0
-    active_reservations = db.scalar(select(func.count(Reservation.id)).where(Reservation.status.in_([ReservationStatus.approved, ReservationStatus.paid]))) or 0
+    active_query = select(func.count(Reservation.id)).where(
+        Reservation.status.in_([ReservationStatus.approved, ReservationStatus.paid])
+    )
+    if current_admin.complex_id is not None:
+        active_query = active_query.join(CommonArea, CommonArea.id == Reservation.common_area_id).where(
+            CommonArea.complex_id == current_admin.complex_id
+        )
+    active_reservations = db.scalar(active_query) or 0
     rate = float(collected / monthly_billed * 100) if monthly_billed else 0
     return DashboardOut(
         total_units=total_units,
@@ -335,13 +342,41 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), curr
 
 
 @router.get("/common-areas", response_model=list[CommonAreaOut])
-def common_areas(db: Session = Depends(get_db)) -> list[CommonArea]:
-    return list(db.scalars(select(CommonArea).where(CommonArea.is_active.is_(True)).order_by(CommonArea.name)))
+def common_areas(
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> list[CommonArea]:
+    """Zonas sociales activas del conjunto del residente autenticado."""
+    from app.services.reservations import ReservationError, get_resident_complex_id, list_active_common_areas_for_complex
+
+    try:
+        complex_id = get_resident_complex_id(db, current_resident)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return list_active_common_areas_for_complex(db, complex_id)
+
+
+@router.get("/admin/common-areas", response_model=list[CommonAreaOut])
+def admin_common_areas(
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> list[CommonArea]:
+    from app.services.reservations import list_common_areas_for_admin
+
+    return list_common_areas_for_admin(db, current_admin.complex_id)
 
 
 @router.get("/admin/reservations", response_model=list[ReservationOut])
-def admin_list_reservations(db: Session = Depends(get_db), current_admin: AdminUser = Depends(get_current_admin)) -> list[Reservation]:
-    return list(db.scalars(select(Reservation).order_by(Reservation.starts_at.desc())))
+def admin_list_reservations(
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> list[Reservation]:
+    query = select(Reservation).order_by(Reservation.starts_at.desc())
+    if current_admin.complex_id is not None:
+        query = query.join(CommonArea, CommonArea.id == Reservation.common_area_id).where(
+            CommonArea.complex_id == current_admin.complex_id
+        )
+    return list(db.scalars(query))
 
 
 @router.get("/reservations", response_model=list[ReservationOut])
@@ -356,53 +391,37 @@ def list_reservations(
 
 
 @router.post("/reservations", response_model=ReservationOut, status_code=status.HTTP_201_CREATED)
-def create_reservation(payload: ReservationCreate, db: Session = Depends(get_db), current_resident: Resident = Depends(get_current_resident)) -> Reservation:
-    if payload.ends_at <= payload.starts_at:
-        raise HTTPException(status_code=400, detail="La fecha final debe ser posterior a la inicial.")
+def create_reservation(
+    payload: ReservationCreate,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> Reservation:
+    from app.services.reservations import ReservationError, create_reservation as create_reservation_service
 
-    area = db.get(CommonArea, payload.common_area_id)
-    resident = db.get(Resident, current_resident.id)
-    if area is None or resident is None:
-        raise HTTPException(status_code=404, detail="Residente o zona comun no existe.")
-
-    overlap = db.scalar(
-        select(Reservation).where(
-            Reservation.common_area_id == payload.common_area_id,
-            Reservation.status.in_([ReservationStatus.approved, ReservationStatus.paid, ReservationStatus.requested]),
-            or_(
-                and_(Reservation.starts_at <= payload.starts_at, Reservation.ends_at > payload.starts_at),
-                and_(Reservation.starts_at < payload.ends_at, Reservation.ends_at >= payload.ends_at),
-                and_(Reservation.starts_at >= payload.starts_at, Reservation.ends_at <= payload.ends_at),
-            ),
+    try:
+        return create_reservation_service(
+            db,
+            current_resident=current_resident,
+            common_area_id=payload.common_area_id,
+            starts_at=payload.starts_at,
+            ends_at=payload.ends_at,
         )
-    )
-    hours = Decimal((payload.ends_at - payload.starts_at).total_seconds() / 3600).quantize(Decimal("0.01"))
-    status_value = ReservationStatus.waitlisted if overlap else (ReservationStatus.requested if area.requires_approval else ReservationStatus.approved)
-    reservation = Reservation(
-        resident_id=current_resident.id,
-        common_area_id=payload.common_area_id,
-        starts_at=payload.starts_at,
-        ends_at=payload.ends_at,
-        status=status_value,
-        amount=area.hourly_rate * hours,
-    )
-    db.add(reservation)
-    db.commit()
-    db.refresh(reservation)
-    return reservation
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @router.patch("/reservations/{reservation_id}/cancel", response_model=ReservationOut)
-def cancel_reservation(reservation_id: UUID, db: Session = Depends(get_db), current_resident: Resident = Depends(get_current_resident)) -> Reservation:
-    reservation = db.get(Reservation, reservation_id)
-    if reservation is None:
-        raise HTTPException(status_code=404, detail="Reserva no encontrada.")
-    if reservation.resident_id != current_resident.id:
-        raise HTTPException(status_code=403, detail="No puedes cancelar esta reserva.")
-    reservation.status = ReservationStatus.cancelled
-    db.commit()
-    db.refresh(reservation)
-    return reservation
+def cancel_reservation(
+    reservation_id: UUID,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> Reservation:
+    from app.services.reservations import ReservationError, cancel_reservation as cancel_reservation_service
+
+    try:
+        return cancel_reservation_service(db, current_resident=current_resident, reservation_id=reservation_id)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
 
 @router.get("/invoices", response_model=list[InvoiceOut])

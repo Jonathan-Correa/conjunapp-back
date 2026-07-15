@@ -25,7 +25,12 @@ from app.core.security import hash_password
 
 
 def seed_database(db: Session) -> None:
-    if db.scalar(select(ResidentialComplex).limit(1)):
+    existing = db.scalar(select(ResidentialComplex).limit(1))
+    if existing:
+        # Backfill admin.complex_id on DBs seeded before Phase 0.
+        for admin in db.scalars(select(AdminUser).where(AdminUser.complex_id.is_(None))).all():
+            admin.complex_id = existing.id
+        db.commit()
         return
 
     complex_ = ResidentialComplex(
@@ -55,6 +60,7 @@ def seed_database(db: Session) -> None:
         password_hash=hash_password("admin123"),
         position="Administradora principal",
         is_super_admin=True,
+        complex_id=complex_.id,
     )
     residents = [
         Resident(user=resident_users[0], unit=units[0], document_number="52123456", phone="+573001112233", resident_type="owner", is_owner=True),
