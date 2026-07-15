@@ -51,6 +51,7 @@ def test_availability_returns_slots_for_open_day(monkeypatch: pytest.MonkeyPatch
         ]
     )
     db = MagicMock()
+    db.scalar.return_value = None  # no special hours
     db.scalars.return_value = []  # no blackouts
     monkeypatch.setattr("app.services.availability.has_blocking_overlap", lambda *_a, **_k: False)
 
@@ -76,6 +77,7 @@ def test_availability_closed_day() -> None:
         ]
     )
     db = MagicMock()
+    db.scalar.return_value = None
     slots = get_availability(db, area=area, day=date(2026, 7, 20), duration_minutes=60, now=datetime(2026, 7, 19))
     assert slots == []
 

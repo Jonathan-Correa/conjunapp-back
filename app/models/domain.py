@@ -35,8 +35,9 @@ class ReservationStatus(str, enum.Enum):
     paid = "paid"
     waitlisted = "waitlisted"  # legacy; no longer assigned
     cancelled = "cancelled"
-    rescheduled = "rescheduled"  # reserved for Fase 3
+    rescheduled = "rescheduled"
     rejected = "rejected"
+    completed = "completed"
 
 
 class VisitorStatus(str, enum.Enum):
@@ -179,6 +180,9 @@ class CommonArea(Base, TimestampMixin):
     schedules: Mapped[list["CommonAreaSchedule"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
     blackouts: Mapped[list["CommonAreaBlackout"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
     images: Mapped[list["CommonAreaImage"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
+    special_hours: Mapped[list["CommonAreaSpecialHours"]] = relationship(
+        back_populates="common_area", cascade="all, delete-orphan"
+    )
 
 
 class CommonAreaSchedule(Base, TimestampMixin):
@@ -236,6 +240,7 @@ class Reservation(Base, TimestampMixin):
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     payment_reference: Mapped[str | None] = mapped_column(String(80))
     reject_reason: Mapped[str | None] = mapped_column(String(240))
+    receipt_number: Mapped[str | None] = mapped_column(String(40), unique=True)
 
     events: Mapped[list["ReservationEvent"]] = relationship(back_populates="reservation", cascade="all, delete-orphan")
 
@@ -252,6 +257,23 @@ class ReservationEvent(Base, TimestampMixin):
     payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
     reservation: Mapped[Reservation] = relationship(back_populates="events")
+
+
+class CommonAreaSpecialHours(Base, TimestampMixin):
+    """Overrides the weekly schedule for a specific calendar date."""
+
+    __tablename__ = "common_area_special_hours"
+    __table_args__ = (UniqueConstraint("common_area_id", "on_date", name="uq_common_area_special_date"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    common_area_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("common_areas.id", ondelete="CASCADE"), nullable=False)
+    on_date: Mapped[date] = mapped_column(Date, nullable=False)
+    open_time: Mapped[time | None] = mapped_column(Time)
+    close_time: Mapped[time | None] = mapped_column(Time)
+    is_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    note: Mapped[str] = mapped_column(String(240), default="", nullable=False)
+
+    common_area: Mapped[CommonArea] = relationship(back_populates="special_hours")
 
 
 class Invoice(Base, TimestampMixin):

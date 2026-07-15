@@ -3,7 +3,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, joinedload
 
@@ -55,10 +55,15 @@ from app.schemas.domain import (
     PeaceClearanceOut,
     AvailabilityOut,
     AvailabilitySlotOut,
+    MaintenanceJobOut,
     ReservationAdminOut,
     ReservationCreate,
     ReservationOut,
+    ReservationReceiptOut,
     ReservationRejectRequest,
+    ReservationReschedule,
+    SpecialHoursCreate,
+    SpecialHoursOut,
     ResidentCreate,
     ResidentRegisterRequest,
     ResidentSummary,
@@ -394,6 +399,7 @@ def common_area_availability(
     area_id: UUID,
     on_date: date = Query(..., alias="date"),
     duration_minutes: int | None = None,
+    exclude_reservation_id: UUID | None = None,
     db: Session = Depends(get_db),
     current_resident: Resident = Depends(get_current_resident),
 ) -> AvailabilityOut:
@@ -408,8 +414,18 @@ def common_area_availability(
         complex_id = get_resident_complex_id(db, current_resident)
         if area.complex_id != complex_id:
             raise HTTPException(status_code=403, detail="La zona social no pertenece a tu conjunto.")
+        if exclude_reservation_id is not None:
+            owned = db.get(Reservation, exclude_reservation_id)
+            if owned is None or owned.resident_id != current_resident.id:
+                raise HTTPException(status_code=403, detail="No puedes excluir esa reserva.")
         duration = duration_minutes or area.min_duration_minutes
-        slots = get_availability(db, area=area, day=on_date, duration_minutes=duration)
+        slots = get_availability(
+            db,
+            area=area,
+            day=on_date,
+            duration_minutes=duration,
+            exclude_reservation_id=exclude_reservation_id,
+        )
     except ReservationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
     return AvailabilityOut(
@@ -588,6 +604,61 @@ def admin_replace_images(
     return to_detail(area)
 
 
+@router.post(
+    "/admin/common-areas/{area_id}/special-hours",
+    response_model=SpecialHoursOut,
+    status_code=status.HTTP_201_CREATED,
+)
+def admin_create_special_hours(
+    area_id: UUID,
+    payload: SpecialHoursCreate,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> SpecialHoursOut:
+    from app.services.common_areas import create_special_hours, get_area
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        row = create_special_hours(db, area=area, payload=payload)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return SpecialHoursOut(
+        id=row.id,
+        common_area_id=row.common_area_id,
+        on_date=row.on_date,
+        open_time=row.open_time.strftime("%H:%M") if row.open_time else None,
+        close_time=row.close_time.strftime("%H:%M") if row.close_time else None,
+        is_closed=row.is_closed,
+        note=row.note or "",
+    )
+
+
+@router.delete("/admin/common-areas/{area_id}/special-hours/{special_id}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_special_hours(
+    area_id: UUID,
+    special_id: UUID,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> None:
+    from app.services.common_areas import delete_special_hours, get_area
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        delete_special_hours(db, area=area, special_id=special_id)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
 @router.get("/admin/reservations", response_model=list[ReservationAdminOut])
 def admin_list_reservations(
     from_date: date | None = None,
@@ -634,11 +705,92 @@ def admin_list_reservations(
             amount=reservation.amount,
             payment_reference=reservation.payment_reference,
             reject_reason=reservation.reject_reason,
+            receipt_number=reservation.receipt_number,
             resident_name=resident_name,
             common_area_name=area_name,
         )
         for reservation, resident_name, area_name in rows
     ]
+
+
+@router.get("/admin/reservations/export")
+def admin_export_reservations(
+    from_date: date | None = None,
+    to_date: date | None = None,
+    common_area_id: UUID | None = None,
+    status_filter: str | None = Query(default=None, alias="status"),
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> Response:
+    import csv
+    import io
+
+    query = (
+        select(Reservation, ResidentUser.full_name, CommonArea.name)
+        .join(CommonArea, CommonArea.id == Reservation.common_area_id)
+        .join(Resident, Resident.id == Reservation.resident_id)
+        .join(ResidentUser, ResidentUser.id == Resident.user_id)
+        .order_by(Reservation.starts_at.desc())
+    )
+    if current_admin.complex_id:
+        query = query.where(CommonArea.complex_id == current_admin.complex_id)
+    if common_area_id:
+        query = query.where(Reservation.common_area_id == common_area_id)
+    if status_filter:
+        try:
+            query = query.where(Reservation.status == ReservationStatus(status_filter))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="Estado inválido.") from exc
+    if from_date:
+        query = query.where(Reservation.starts_at >= datetime.combine(from_date, datetime.min.time()))
+    if to_date:
+        query = query.where(Reservation.starts_at < datetime.combine(to_date, datetime.min.time()) + timedelta(days=1))
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(
+        [
+            "id",
+            "resident_name",
+            "common_area_name",
+            "starts_at",
+            "ends_at",
+            "status",
+            "amount",
+            "receipt_number",
+            "reject_reason",
+        ]
+    )
+    for reservation, resident_name, area_name in db.execute(query).all():
+        writer.writerow(
+            [
+                str(reservation.id),
+                resident_name,
+                area_name,
+                reservation.starts_at.isoformat(),
+                reservation.ends_at.isoformat(),
+                reservation.status.value,
+                str(reservation.amount),
+                reservation.receipt_number or "",
+                reservation.reject_reason or "",
+            ]
+        )
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=reservas.csv"},
+    )
+
+
+@router.post("/admin/jobs/reservations-maintenance", response_model=MaintenanceJobOut)
+def admin_run_reservations_maintenance(
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> MaintenanceJobOut:
+    from app.services.availability import run_reservation_maintenance
+
+    _ = current_admin
+    return MaintenanceJobOut(**run_reservation_maintenance(db))
 
 
 @router.post("/admin/reservations/{reservation_id}/approve", response_model=ReservationAdminOut)
@@ -713,6 +865,7 @@ def _admin_mutation(db: Session, current_admin: AdminUser, reservation_id: UUID,
         amount=reservation.amount,
         payment_reference=reservation.payment_reference,
         reject_reason=reservation.reject_reason,
+        receipt_number=reservation.receipt_number,
         resident_name=resident.user.full_name if resident.user else str(resident.id),
         common_area_name=area.name,
     )
@@ -745,6 +898,48 @@ def create_reservation(
             starts_at=payload.starts_at,
             ends_at=payload.ends_at,
         )
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.patch("/reservations/{reservation_id}/reschedule", response_model=ReservationOut)
+def reschedule_reservation_route(
+    reservation_id: UUID,
+    payload: ReservationReschedule,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> Reservation:
+    from app.services.availability import reschedule_reservation
+    from app.services.reservations import ReservationError
+
+    try:
+        return reschedule_reservation(
+            db,
+            current_resident=current_resident,
+            reservation_id=reservation_id,
+            starts_at=payload.starts_at,
+            ends_at=payload.ends_at,
+        )
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/reservations/{reservation_id}/receipt", response_model=ReservationReceiptOut)
+def reservation_receipt(
+    reservation_id: UUID,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> ReservationReceiptOut:
+    from app.services.availability import build_receipt
+    from app.services.reservations import ReservationError
+
+    reservation = db.get(Reservation, reservation_id)
+    if reservation is None:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada.")
+    if reservation.resident_id != current_resident.id:
+        raise HTTPException(status_code=403, detail="No puedes ver este comprobante.")
+    try:
+        return ReservationReceiptOut(**build_receipt(db, reservation=reservation))
     except ReservationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 

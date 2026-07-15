@@ -208,15 +208,39 @@ class ScheduleOut(ORMModel):
     is_closed: bool
 
 
+class SpecialHoursCreate(BaseModel):
+    on_date: date
+    open_time: str | None = None  # HH:MM
+    close_time: str | None = None
+    is_closed: bool = False
+    note: str = ""
+
+
+class SpecialHoursOut(ORMModel):
+    id: UUID
+    common_area_id: UUID
+    on_date: date
+    open_time: str | None = None
+    close_time: str | None = None
+    is_closed: bool
+    note: str
+
+
 class CommonAreaDetailOut(CommonAreaOut):
     schedules: list[ScheduleOut] = Field(default_factory=list)
     blackouts: list[BlackoutOut] = Field(default_factory=list)
     images: list[ImageOut] = Field(default_factory=list)
+    special_hours: list[SpecialHoursOut] = Field(default_factory=list)
 
 
 class ReservationCreate(BaseModel):
     resident_id: UUID
     common_area_id: UUID
+    starts_at: datetime
+    ends_at: datetime
+
+
+class ReservationReschedule(BaseModel):
     starts_at: datetime
     ends_at: datetime
 
@@ -231,6 +255,7 @@ class ReservationOut(ORMModel):
     amount: Decimal
     payment_reference: str | None
     reject_reason: str | None = None
+    receipt_number: str | None = None
 
 
 class ReservationAdminOut(ReservationOut):
@@ -240,6 +265,23 @@ class ReservationAdminOut(ReservationOut):
 
 class ReservationRejectRequest(BaseModel):
     reason: str = ""
+
+
+class ReservationReceiptOut(BaseModel):
+    receipt_number: str
+    reservation_id: UUID
+    zone_name: str
+    resident_name: str
+    starts_at: datetime
+    ends_at: datetime
+    amount: Decimal
+    status: str
+    issued_at: datetime
+
+
+class MaintenanceJobOut(BaseModel):
+    completed: int
+    expired: int
 
 
 class AvailabilitySlotOut(BaseModel):

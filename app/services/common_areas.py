@@ -10,6 +10,7 @@ from app.models.domain import (
     CommonAreaBlackout,
     CommonAreaImage,
     CommonAreaSchedule,
+    CommonAreaSpecialHours,
 )
 from app.schemas.domain import (
     BlackoutCreate,
@@ -22,6 +23,8 @@ from app.schemas.domain import (
     ScheduleItem,
     ScheduleOut,
     BlackoutOut,
+    SpecialHoursCreate,
+    SpecialHoursOut,
 )
 from app.services.reservations import ReservationError
 
@@ -92,6 +95,18 @@ def to_detail(area: CommonArea) -> CommonAreaDetailOut:
             ImageOut(id=i.id, url=i.url, sort_order=i.sort_order)
             for i in sorted(area.images, key=lambda x: x.sort_order)
         ],
+        special_hours=[
+            SpecialHoursOut(
+                id=h.id,
+                common_area_id=h.common_area_id,
+                on_date=h.on_date,
+                open_time=_fmt_time(h.open_time),
+                close_time=_fmt_time(h.close_time),
+                is_closed=h.is_closed,
+                note=h.note or "",
+            )
+            for h in sorted(area.special_hours, key=lambda x: x.on_date)
+        ],
     )
 
 
@@ -113,6 +128,7 @@ def get_area(db: Session, area_id: UUID) -> CommonArea | None:
             selectinload(CommonArea.schedules),
             selectinload(CommonArea.blackouts),
             selectinload(CommonArea.images),
+            selectinload(CommonArea.special_hours),
         )
         .where(CommonArea.id == area_id)
     )
@@ -244,8 +260,15 @@ def replace_images(db: Session, *, area: CommonArea, items: list[ImageItem]) -> 
     return get_area(db, area.id)  # type: ignore[return-value]
 
 
-def validate_booking_window(area: CommonArea, starts_at: datetime, ends_at: datetime, now: datetime | None = None) -> None:
-    """Phase 1 business rules used when creating a reservation."""
+def validate_booking_window(
+    area: CommonArea,
+    starts_at: datetime,
+    ends_at: datetime,
+    now: datetime | None = None,
+    *,
+    db: Session | None = None,
+) -> None:
+    """Business rules used when creating or rescheduling a reservation."""
     now = now or datetime.utcnow()
     if not area.is_bookable:
         raise ReservationError(409, "Esta zona social es solo informativa (no reservable).")
@@ -266,6 +289,22 @@ def validate_booking_window(area: CommonArea, starts_at: datetime, ends_at: date
     if starts_at.date() != ends_at.date():
         raise ReservationError(400, "Las reservas deben iniciar y terminar el mismo día.")
 
+    # Special hours override weekly schedule when present.
+    special = None
+    if db is not None:
+        special = db.scalar(
+            select(CommonAreaSpecialHours).where(
+                CommonAreaSpecialHours.common_area_id == area.id,
+                CommonAreaSpecialHours.on_date == starts_at.date(),
+            )
+        )
+    if special is not None:
+        if special.is_closed or special.open_time is None or special.close_time is None:
+            raise ReservationError(409, "La zona no opera en esa fecha (horario especial/cierre).")
+        if starts_at.time() < special.open_time or ends_at.time() > special.close_time:
+            raise ReservationError(409, "El horario está fuera de la franja de apertura.")
+        return
+
     if area.schedules:
         weekday = starts_at.weekday()  # Monday=0
         day = next((s for s in area.schedules if s.weekday == weekday), None)
@@ -275,6 +314,53 @@ def validate_booking_window(area: CommonArea, starts_at: datetime, ends_at: date
             raise ReservationError(409, "La zona está cerrada ese día.")
         if starts_at.time() < day.open_time or ends_at.time() > day.close_time:
             raise ReservationError(409, "El horario está fuera de la franja de apertura.")
+
+
+def create_special_hours(db: Session, *, area: CommonArea, payload: SpecialHoursCreate) -> CommonAreaSpecialHours:
+    if not payload.is_closed:
+        open_t = _parse_hhmm(payload.open_time)
+        close_t = _parse_hhmm(payload.close_time)
+        if open_t is None or close_t is None or close_t <= open_t:
+            raise ReservationError(400, "Horario especial inválido.")
+    else:
+        open_t = close_t = None
+
+    existing = db.scalar(
+        select(CommonAreaSpecialHours).where(
+            CommonAreaSpecialHours.common_area_id == area.id,
+            CommonAreaSpecialHours.on_date == payload.on_date,
+        )
+    )
+    if existing is not None:
+        existing.open_time = open_t
+        existing.close_time = close_t
+        existing.is_closed = payload.is_closed
+        existing.note = payload.note or ""
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    row = CommonAreaSpecialHours(
+        id=uuid4(),
+        common_area_id=area.id,
+        on_date=payload.on_date,
+        open_time=open_t,
+        close_time=close_t,
+        is_closed=payload.is_closed,
+        note=payload.note or "",
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def delete_special_hours(db: Session, *, area: CommonArea, special_id: UUID) -> None:
+    row = db.get(CommonAreaSpecialHours, special_id)
+    if row is None or row.common_area_id != area.id:
+        raise ReservationError(404, "Horario especial no encontrado.")
+    db.delete(row)
+    db.commit()
 
 
 def has_blackout_conflict(db: Session, area_id: UUID, starts_at: datetime, ends_at: datetime) -> bool:
