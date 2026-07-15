@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import func, select
-from sqlalchemy.orm import Session, joinedload, selectinload
+from sqlalchemy.orm import Session, joinedload
 
 from app.models.domain import CommonArea, Invoice, Reservation, ReservationStatus, Resident, Unit
 
@@ -104,64 +104,18 @@ def create_reservation(
     starts_at: datetime,
     ends_at: datetime,
 ) -> Reservation:
-    from app.services.common_areas import has_blackout_conflict, validate_booking_window
+    from app.services.availability import create_reservation_with_event
 
-    if ends_at <= starts_at:
-        raise ReservationError(400, "La fecha final debe ser posterior a la inicial.")
-
-    area = db.scalar(
-        select(CommonArea).options(selectinload(CommonArea.schedules)).where(CommonArea.id == common_area_id)
-    )
-    if area is None:
-        raise ReservationError(404, "Zona social no encontrada.")
-    if not area.is_active:
-        raise ReservationError(409, "La zona social está inactiva.")
-
-    complex_id = get_resident_complex_id(db, current_resident)
-    if area.complex_id != complex_id:
-        raise ReservationError(403, "La zona social no pertenece a tu conjunto.")
-
-    if unit_balance(db, current_resident.unit_id) > 0:
-        raise ReservationError(409, "No puedes reservar con saldo pendiente de administración.")
-
-    validate_booking_window(area, starts_at, ends_at)
-
-    if has_blackout_conflict(db, common_area_id, starts_at, ends_at):
-        raise ReservationError(409, "La zona tiene un bloqueo/mantenimiento en ese horario.")
-
-    active = count_active_reservations(db, resident_id=current_resident.id, common_area_id=common_area_id)
-    if active >= area.max_active_per_resident:
-        raise ReservationError(409, "Alcanzaste el máximo de reservas activas para esta zona.")
-
-    if has_blocking_overlap(db, common_area_id, starts_at, ends_at, buffer_minutes=area.cleanup_buffer_minutes):
-        raise ReservationError(409, "El horario solicitado no está disponible.")
-
-    hours = Decimal((ends_at - starts_at).total_seconds() / 3600).quantize(Decimal("0.01"))
-    amount = (area.hourly_rate * hours) if area.has_cost or area.hourly_rate > 0 else Decimal("0")
-    status_value = ReservationStatus.requested if area.requires_approval else ReservationStatus.approved
-    reservation = Reservation(
-        resident_id=current_resident.id,
+    return create_reservation_with_event(
+        db,
+        current_resident=current_resident,
         common_area_id=common_area_id,
         starts_at=starts_at,
         ends_at=ends_at,
-        status=status_value,
-        amount=amount,
     )
-    db.add(reservation)
-    db.commit()
-    db.refresh(reservation)
-    return reservation
 
 
 def cancel_reservation(db: Session, *, current_resident: Resident, reservation_id: UUID) -> Reservation:
-    reservation = db.get(Reservation, reservation_id)
-    if reservation is None:
-        raise ReservationError(404, "Reserva no encontrada.")
-    if reservation.resident_id != current_resident.id:
-        raise ReservationError(403, "No puedes cancelar esta reserva.")
-    if reservation.status in {ReservationStatus.cancelled}:
-        raise ReservationError(409, "La reserva ya está cancelada.")
-    reservation.status = ReservationStatus.cancelled
-    db.commit()
-    db.refresh(reservation)
-    return reservation
+    from app.services.availability import resident_cancel_reservation
+
+    return resident_cancel_reservation(db, current_resident=current_resident, reservation_id=reservation_id)

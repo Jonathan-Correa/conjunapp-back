@@ -33,9 +33,10 @@ class ReservationStatus(str, enum.Enum):
     requested = "requested"
     approved = "approved"
     paid = "paid"
-    waitlisted = "waitlisted"
+    waitlisted = "waitlisted"  # legacy; no longer assigned
     cancelled = "cancelled"
-    rescheduled = "rescheduled"
+    rescheduled = "rescheduled"  # reserved for Fase 3
+    rejected = "rejected"
 
 
 class VisitorStatus(str, enum.Enum):
@@ -234,6 +235,23 @@ class Reservation(Base, TimestampMixin):
     status: Mapped[ReservationStatus] = mapped_column(Enum(ReservationStatus), default=ReservationStatus.requested, nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     payment_reference: Mapped[str | None] = mapped_column(String(80))
+    reject_reason: Mapped[str | None] = mapped_column(String(240))
+
+    events: Mapped[list["ReservationEvent"]] = relationship(back_populates="reservation", cascade="all, delete-orphan")
+
+
+class ReservationEvent(Base, TimestampMixin):
+    __tablename__ = "reservation_events"
+    __table_args__ = (Index("ix_reservation_events_reservation", "reservation_id", "created_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reservation_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("reservations.id", ondelete="CASCADE"), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor_type: Mapped[str] = mapped_column(String(20), nullable=False)  # resident | admin | system
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    reservation: Mapped[Reservation] = relationship(back_populates="events")
 
 
 class Invoice(Base, TimestampMixin):

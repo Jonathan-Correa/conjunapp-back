@@ -230,6 +230,29 @@ class ReservationOut(ORMModel):
     status: ReservationStatus
     amount: Decimal
     payment_reference: str | None
+    reject_reason: str | None = None
+
+
+class ReservationAdminOut(ReservationOut):
+    resident_name: str
+    common_area_name: str
+
+
+class ReservationRejectRequest(BaseModel):
+    reason: str = ""
+
+
+class AvailabilitySlotOut(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+    amount: Decimal
+
+
+class AvailabilityOut(BaseModel):
+    common_area_id: UUID
+    date: date
+    duration_minutes: int
+    slots: list[AvailabilitySlotOut]
 
 
 class InvoiceOut(ORMModel):
