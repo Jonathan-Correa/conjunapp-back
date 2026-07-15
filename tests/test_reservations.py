@@ -19,7 +19,7 @@ def test_intervals_overlap_detects_partial_and_contained() -> None:
     assert not intervals_overlap(start, end, start - timedelta(hours=2), start)
 
 
-def test_create_reservation_rejects_inactive_zone() -> None:
+def test_create_reservation_rejects_inactive_zone(monkeypatch: pytest.MonkeyPatch) -> None:
     db = MagicMock()
     area = CommonArea(
         id=uuid4(),
@@ -30,9 +30,11 @@ def test_create_reservation_rejects_inactive_zone() -> None:
         requires_approval=False,
         rules="",
         is_active=False,
+        is_bookable=True,
     )
-    db.get.return_value = area
+    db.scalar.return_value = area
     resident = Resident(id=uuid4(), unit_id=uuid4())
+    monkeypatch.setattr("app.services.reservations.get_resident_complex_id", lambda *_a, **_k: area.complex_id)
 
     with pytest.raises(ReservationError) as exc:
         create_reservation(
@@ -73,13 +75,25 @@ def test_create_reservation_happy_path_auto_approved(monkeypatch: pytest.MonkeyP
         requires_approval=False,
         rules="",
         is_active=True,
+        is_bookable=True,
+        has_cost=True,
+        min_duration_minutes=60,
+        max_duration_minutes=240,
+        min_advance_minutes=0,
+        max_advance_days=90,
+        cleanup_buffer_minutes=0,
+        max_active_per_resident=3,
+        schedules=[],
     )
     resident = Resident(id=uuid4(), unit_id=uuid4())
-    db.get.return_value = area
+    db.scalar.return_value = area
 
     monkeypatch.setattr("app.services.reservations.get_resident_complex_id", lambda *_a, **_k: complex_id)
     monkeypatch.setattr("app.services.reservations.unit_balance", lambda *_a, **_k: Decimal("0"))
     monkeypatch.setattr("app.services.reservations.has_blocking_overlap", lambda *_a, **_k: False)
+    monkeypatch.setattr("app.services.reservations.count_active_reservations", lambda *_a, **_k: 0)
+    monkeypatch.setattr("app.services.common_areas.has_blackout_conflict", lambda *_a, **_k: False)
+    monkeypatch.setattr("app.services.common_areas.validate_booking_window", lambda *_a, **_k: None)
 
     starts = datetime(2026, 7, 20, 10, 0)
     ends = datetime(2026, 7, 20, 12, 0)
@@ -109,9 +123,10 @@ def test_create_reservation_blocks_delinquent(monkeypatch: pytest.MonkeyPatch) -
         requires_approval=True,
         rules="",
         is_active=True,
+        is_bookable=True,
     )
     resident = Resident(id=uuid4(), unit_id=uuid4())
-    db.get.return_value = area
+    db.scalar.return_value = area
     monkeypatch.setattr("app.services.reservations.get_resident_complex_id", lambda *_a, **_k: complex_id)
     monkeypatch.setattr("app.services.reservations.unit_balance", lambda *_a, **_k: Decimal("100000"))
 
@@ -139,11 +154,18 @@ def test_create_reservation_rejects_overlap(monkeypatch: pytest.MonkeyPatch) -> 
         requires_approval=False,
         rules="",
         is_active=True,
+        is_bookable=True,
+        cleanup_buffer_minutes=0,
+        max_active_per_resident=3,
+        schedules=[],
     )
     resident = Resident(id=uuid4(), unit_id=uuid4())
-    db.get.return_value = area
+    db.scalar.return_value = area
     monkeypatch.setattr("app.services.reservations.get_resident_complex_id", lambda *_a, **_k: complex_id)
     monkeypatch.setattr("app.services.reservations.unit_balance", lambda *_a, **_k: Decimal("0"))
+    monkeypatch.setattr("app.services.reservations.count_active_reservations", lambda *_a, **_k: 0)
+    monkeypatch.setattr("app.services.common_areas.validate_booking_window", lambda *_a, **_k: None)
+    monkeypatch.setattr("app.services.common_areas.has_blackout_conflict", lambda *_a, **_k: False)
     monkeypatch.setattr("app.services.reservations.has_blocking_overlap", lambda *_a, **_k: True)
 
     with pytest.raises(ReservationError) as exc:

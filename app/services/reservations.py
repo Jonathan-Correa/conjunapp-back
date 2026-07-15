@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.domain import CommonArea, Invoice, Reservation, ReservationStatus, Resident, Unit
 
@@ -64,20 +64,36 @@ def has_blocking_overlap(
     starts_at: datetime,
     ends_at: datetime,
     *,
+    buffer_minutes: int = 0,
     exclude_reservation_id: UUID | None = None,
 ) -> bool:
+    buffer = timedelta(minutes=max(buffer_minutes, 0))
+    window_start = starts_at - buffer
+    window_end = ends_at + buffer
     query = select(Reservation.id).where(
         Reservation.common_area_id == common_area_id,
         Reservation.status.in_(BLOCKING_STATUSES),
-        or_(
-            and_(Reservation.starts_at <= starts_at, Reservation.ends_at > starts_at),
-            and_(Reservation.starts_at < ends_at, Reservation.ends_at >= ends_at),
-            and_(Reservation.starts_at >= starts_at, Reservation.ends_at <= ends_at),
-        ),
+        Reservation.starts_at < window_end,
+        Reservation.ends_at > window_start,
     )
     if exclude_reservation_id is not None:
         query = query.where(Reservation.id != exclude_reservation_id)
     return db.scalar(query.limit(1)) is not None
+
+
+def count_active_reservations(db: Session, *, resident_id: UUID, common_area_id: UUID, now: datetime | None = None) -> int:
+    now = now or datetime.utcnow()
+    return (
+        db.scalar(
+            select(func.count(Reservation.id)).where(
+                Reservation.resident_id == resident_id,
+                Reservation.common_area_id == common_area_id,
+                Reservation.status.in_(BLOCKING_STATUSES),
+                Reservation.ends_at > now,
+            )
+        )
+        or 0
+    )
 
 
 def create_reservation(
@@ -88,10 +104,14 @@ def create_reservation(
     starts_at: datetime,
     ends_at: datetime,
 ) -> Reservation:
+    from app.services.common_areas import has_blackout_conflict, validate_booking_window
+
     if ends_at <= starts_at:
         raise ReservationError(400, "La fecha final debe ser posterior a la inicial.")
 
-    area = db.get(CommonArea, common_area_id)
+    area = db.scalar(
+        select(CommonArea).options(selectinload(CommonArea.schedules)).where(CommonArea.id == common_area_id)
+    )
     if area is None:
         raise ReservationError(404, "Zona social no encontrada.")
     if not area.is_active:
@@ -104,10 +124,20 @@ def create_reservation(
     if unit_balance(db, current_resident.unit_id) > 0:
         raise ReservationError(409, "No puedes reservar con saldo pendiente de administración.")
 
-    if has_blocking_overlap(db, common_area_id, starts_at, ends_at):
+    validate_booking_window(area, starts_at, ends_at)
+
+    if has_blackout_conflict(db, common_area_id, starts_at, ends_at):
+        raise ReservationError(409, "La zona tiene un bloqueo/mantenimiento en ese horario.")
+
+    active = count_active_reservations(db, resident_id=current_resident.id, common_area_id=common_area_id)
+    if active >= area.max_active_per_resident:
+        raise ReservationError(409, "Alcanzaste el máximo de reservas activas para esta zona.")
+
+    if has_blocking_overlap(db, common_area_id, starts_at, ends_at, buffer_minutes=area.cleanup_buffer_minutes):
         raise ReservationError(409, "El horario solicitado no está disponible.")
 
     hours = Decimal((ends_at - starts_at).total_seconds() / 3600).quantize(Decimal("0.01"))
+    amount = (area.hourly_rate * hours) if area.has_cost or area.hourly_rate > 0 else Decimal("0")
     status_value = ReservationStatus.requested if area.requires_approval else ReservationStatus.approved
     reservation = Reservation(
         resident_id=current_resident.id,
@@ -115,7 +145,7 @@ def create_reservation(
         starts_at=starts_at,
         ends_at=ends_at,
         status=status_value,
-        amount=area.hourly_rate * hours,
+        amount=amount,
     )
     db.add(reservation)
     db.commit()

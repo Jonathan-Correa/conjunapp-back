@@ -38,9 +38,15 @@ from app.schemas.domain import (
     AdminUserOut,
     AnnouncementCreate,
     AnnouncementOut,
+    BlackoutCreate,
+    BlackoutOut,
+    CommonAreaCreate,
+    CommonAreaDetailOut,
     CommonAreaOut,
+    CommonAreaUpdate,
     DashboardOut,
     GenerateInvoicesRequest,
+    ImageItem,
     InvoiceOut,
     LoginRequest,
     PaymentAgreementCreate,
@@ -54,6 +60,7 @@ from app.schemas.domain import (
     ResidentSummary,
     ResidentAuthResponse,
     ResidentUserOut,
+    ScheduleItem,
     UnitSummary,
     VisitorCreate,
     VisitorOut,
@@ -345,25 +352,205 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), curr
 def common_areas(
     db: Session = Depends(get_db),
     current_resident: Resident = Depends(get_current_resident),
-) -> list[CommonArea]:
+) -> list[CommonAreaOut]:
     """Zonas sociales activas del conjunto del residente autenticado."""
+    from app.services.common_areas import to_common_area_out
     from app.services.reservations import ReservationError, get_resident_complex_id, list_active_common_areas_for_complex
 
     try:
         complex_id = get_resident_complex_id(db, current_resident)
     except ReservationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
-    return list_active_common_areas_for_complex(db, complex_id)
+    return [to_common_area_out(a) for a in list_active_common_areas_for_complex(db, complex_id)]
+
+
+@router.get("/common-areas/{area_id}", response_model=CommonAreaDetailOut)
+def common_area_detail(
+    area_id: UUID,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> CommonAreaDetailOut:
+    from app.services.common_areas import get_area, to_detail
+    from app.services.reservations import ReservationError, get_resident_complex_id
+
+    area = get_area(db, area_id)
+    if area is None or not area.is_active:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    try:
+        complex_id = get_resident_complex_id(db, current_resident)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    if area.complex_id != complex_id:
+        raise HTTPException(status_code=403, detail="La zona social no pertenece a tu conjunto.")
+    return to_detail(area)
 
 
 @router.get("/admin/common-areas", response_model=list[CommonAreaOut])
 def admin_common_areas(
     db: Session = Depends(get_db),
     current_admin: AdminUser = Depends(get_current_admin),
-) -> list[CommonArea]:
+) -> list[CommonAreaOut]:
+    from app.services.common_areas import to_common_area_out
     from app.services.reservations import list_common_areas_for_admin
 
-    return list_common_areas_for_admin(db, current_admin.complex_id)
+    return [to_common_area_out(a) for a in list_common_areas_for_admin(db, current_admin.complex_id)]
+
+
+@router.post("/admin/common-areas", response_model=CommonAreaOut, status_code=status.HTTP_201_CREATED)
+def admin_create_common_area(
+    payload: CommonAreaCreate,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaOut:
+    from app.services.common_areas import create_common_area, to_common_area_out
+    from app.services.reservations import ReservationError
+
+    try:
+        area = create_common_area(db, admin_complex_id=current_admin.complex_id, payload=payload)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return to_common_area_out(area)
+
+
+@router.get("/admin/common-areas/{area_id}", response_model=CommonAreaDetailOut)
+def admin_common_area_detail(
+    area_id: UUID,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaDetailOut:
+    from app.services.common_areas import get_area, to_detail
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    return to_detail(area)
+
+
+@router.patch("/admin/common-areas/{area_id}", response_model=CommonAreaOut)
+def admin_update_common_area(
+    area_id: UUID,
+    payload: CommonAreaUpdate,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaOut:
+    from app.services.common_areas import get_area, to_common_area_out, update_common_area
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        area = update_common_area(db, area=area, payload=payload)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return to_common_area_out(area)
+
+
+@router.delete("/admin/common-areas/{area_id}", response_model=CommonAreaOut)
+def admin_deactivate_common_area(
+    area_id: UUID,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaOut:
+    from app.services.common_areas import deactivate_common_area, get_area, to_common_area_out
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    return to_common_area_out(deactivate_common_area(db, area=area))
+
+
+@router.put("/admin/common-areas/{area_id}/schedules", response_model=CommonAreaDetailOut)
+def admin_replace_schedules(
+    area_id: UUID,
+    items: list[ScheduleItem],
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaDetailOut:
+    from app.services.common_areas import get_area, replace_schedules, to_detail
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        area = replace_schedules(db, area=area, items=items)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return to_detail(area)
+
+
+@router.post("/admin/common-areas/{area_id}/blackouts", response_model=BlackoutOut, status_code=status.HTTP_201_CREATED)
+def admin_create_blackout(
+    area_id: UUID,
+    payload: BlackoutCreate,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> BlackoutOut:
+    from app.services.common_areas import create_blackout, get_area
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        row = create_blackout(db, area=area, payload=payload)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return BlackoutOut.model_validate(row)
+
+
+@router.delete("/admin/common-areas/{area_id}/blackouts/{blackout_id}", status_code=status.HTTP_204_NO_CONTENT)
+def admin_delete_blackout(
+    area_id: UUID,
+    blackout_id: UUID,
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> None:
+    from app.services.common_areas import delete_blackout, get_area
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        delete_blackout(db, area=area, blackout_id=blackout_id)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.put("/admin/common-areas/{area_id}/images", response_model=CommonAreaDetailOut)
+def admin_replace_images(
+    area_id: UUID,
+    items: list[ImageItem],
+    db: Session = Depends(get_db),
+    current_admin: AdminUser = Depends(get_current_admin),
+) -> CommonAreaDetailOut:
+    from app.services.common_areas import get_area, replace_images, to_detail
+    from app.services.reservations import ReservationError
+
+    area = get_area(db, area_id)
+    if area is None:
+        raise HTTPException(status_code=404, detail="Zona social no encontrada.")
+    if current_admin.complex_id and area.complex_id != current_admin.complex_id:
+        raise HTTPException(status_code=403, detail="Zona fuera de tu conjunto.")
+    try:
+        area = replace_images(db, area=area, items=items)
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+    return to_detail(area)
 
 
 @router.get("/admin/reservations", response_model=list[ReservationOut])

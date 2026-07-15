@@ -108,11 +108,110 @@ class ResidentCreate(BaseModel):
 class CommonAreaOut(ORMModel):
     id: UUID
     name: str
+    category: str = "general"
+    description: str = ""
     capacity: int
     hourly_rate: Decimal
+    has_cost: bool = False
     requires_approval: bool
     rules: str
     is_active: bool
+    is_bookable: bool = True
+    min_duration_minutes: int = 60
+    max_duration_minutes: int = 240
+    min_advance_minutes: int = 0
+    max_advance_days: int = 90
+    cleanup_buffer_minutes: int = 0
+    max_active_per_resident: int = 3
+    required_documents: list[str] = Field(default_factory=list)
+
+
+class CommonAreaCreate(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    category: str = "general"
+    description: str = ""
+    capacity: int = Field(gt=0)
+    hourly_rate: Decimal = Field(ge=0, default=Decimal("0"))
+    has_cost: bool = False
+    requires_approval: bool = False
+    rules: str = ""
+    is_active: bool = True
+    is_bookable: bool = True
+    min_duration_minutes: int = Field(ge=15, default=60)
+    max_duration_minutes: int = Field(ge=15, default=240)
+    min_advance_minutes: int = Field(ge=0, default=0)
+    max_advance_days: int = Field(ge=1, default=90)
+    cleanup_buffer_minutes: int = Field(ge=0, default=0)
+    max_active_per_resident: int = Field(ge=1, default=3)
+    required_documents: list[str] = Field(default_factory=list)
+
+
+class CommonAreaUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=2, max_length=120)
+    category: str | None = None
+    description: str | None = None
+    capacity: int | None = Field(default=None, gt=0)
+    hourly_rate: Decimal | None = Field(default=None, ge=0)
+    has_cost: bool | None = None
+    requires_approval: bool | None = None
+    rules: str | None = None
+    is_active: bool | None = None
+    is_bookable: bool | None = None
+    min_duration_minutes: int | None = Field(default=None, ge=15)
+    max_duration_minutes: int | None = Field(default=None, ge=15)
+    min_advance_minutes: int | None = Field(default=None, ge=0)
+    max_advance_days: int | None = Field(default=None, ge=1)
+    cleanup_buffer_minutes: int | None = Field(default=None, ge=0)
+    max_active_per_resident: int | None = Field(default=None, ge=1)
+    required_documents: list[str] | None = None
+
+
+class ScheduleItem(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    open_time: str | None = None  # HH:MM
+    close_time: str | None = None
+    is_closed: bool = False
+
+
+class BlackoutCreate(BaseModel):
+    reason_type: str = Field(pattern="^(maintenance|holiday|block)$")
+    starts_at: datetime
+    ends_at: datetime
+    note: str = ""
+
+
+class BlackoutOut(ORMModel):
+    id: UUID
+    common_area_id: UUID
+    reason_type: str
+    starts_at: datetime
+    ends_at: datetime
+    note: str
+
+
+class ImageItem(BaseModel):
+    url: str = Field(min_length=4, max_length=500)
+    sort_order: int = 0
+
+
+class ImageOut(ORMModel):
+    id: UUID
+    url: str
+    sort_order: int
+
+
+class ScheduleOut(ORMModel):
+    id: UUID
+    weekday: int
+    open_time: str | None = None
+    close_time: str | None = None
+    is_closed: bool
+
+
+class CommonAreaDetailOut(CommonAreaOut):
+    schedules: list[ScheduleOut] = Field(default_factory=list)
+    blackouts: list[BlackoutOut] = Field(default_factory=list)
+    images: list[ImageOut] = Field(default_factory=list)
 
 
 class ReservationCreate(BaseModel):

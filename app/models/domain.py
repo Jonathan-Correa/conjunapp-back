@@ -1,9 +1,9 @@
 import enum
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Enum, ForeignKey, Index, Integer, JSON, Numeric, String, Text, Time, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -158,11 +158,65 @@ class CommonArea(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     complex_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("residential_complexes.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
+    category: Mapped[str] = mapped_column(String(60), default="general", nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     capacity: Mapped[int] = mapped_column(Integer, nullable=False)
     hourly_rate: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    has_cost: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     requires_approval: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     rules: Mapped[str] = mapped_column(Text, default="", nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_bookable: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    min_duration_minutes: Mapped[int] = mapped_column(Integer, default=60, nullable=False)
+    max_duration_minutes: Mapped[int] = mapped_column(Integer, default=240, nullable=False)
+    min_advance_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_advance_days: Mapped[int] = mapped_column(Integer, default=90, nullable=False)
+    cleanup_buffer_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_active_per_resident: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    required_documents: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+
+    schedules: Mapped[list["CommonAreaSchedule"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
+    blackouts: Mapped[list["CommonAreaBlackout"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
+    images: Mapped[list["CommonAreaImage"]] = relationship(back_populates="common_area", cascade="all, delete-orphan")
+
+
+class CommonAreaSchedule(Base, TimestampMixin):
+    __tablename__ = "common_area_schedules"
+    __table_args__ = (UniqueConstraint("common_area_id", "weekday", name="uq_common_area_weekday"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    common_area_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("common_areas.id", ondelete="CASCADE"), nullable=False)
+    weekday: Mapped[int] = mapped_column(Integer, nullable=False)  # 0=Monday .. 6=Sunday
+    open_time: Mapped[time | None] = mapped_column(Time)
+    close_time: Mapped[time | None] = mapped_column(Time)
+    is_closed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    common_area: Mapped[CommonArea] = relationship(back_populates="schedules")
+
+
+class CommonAreaBlackout(Base, TimestampMixin):
+    __tablename__ = "common_area_blackouts"
+    __table_args__ = (Index("ix_common_area_blackouts_range", "common_area_id", "starts_at", "ends_at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    common_area_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("common_areas.id", ondelete="CASCADE"), nullable=False)
+    reason_type: Mapped[str] = mapped_column(String(40), nullable=False)  # maintenance | holiday | block
+    starts_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    ends_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    note: Mapped[str] = mapped_column(String(240), default="", nullable=False)
+
+    common_area: Mapped[CommonArea] = relationship(back_populates="blackouts")
+
+
+class CommonAreaImage(Base, TimestampMixin):
+    __tablename__ = "common_area_images"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    common_area_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("common_areas.id", ondelete="CASCADE"), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    common_area: Mapped[CommonArea] = relationship(back_populates="images")
 
 
 class Reservation(Base, TimestampMixin):
