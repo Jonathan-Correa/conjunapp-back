@@ -102,6 +102,7 @@ class ResidentCreate(BaseModel):
     unit_number: str
     administration_fee: Decimal = Field(gt=0)
     parking_slot: str | None = None
+    initial_password: str = Field(min_length=8)
 
 
 class CommonAreaOut(ORMModel):

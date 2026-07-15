@@ -8,6 +8,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.auth import get_current_admin, get_current_resident
+from app.core.config import get_settings
 from app.core.security import create_access_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models.domain import (
@@ -117,16 +118,20 @@ def admin_me(current_admin: AdminUser = Depends(get_current_admin)) -> AdminUser
 
 @router.post("/auth/admin/register", response_model=AdminAuthResponse)
 def admin_register(payload: AdminRegisterRequest, db: Session = Depends(get_db)) -> AdminAuthResponse:
-    # Validar que las contraseñas coincidan
+    settings = get_settings()
+    if not settings.allow_admin_register:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="El registro publico de administradores esta deshabilitado.",
+        )
+
     if payload.password != payload.password_confirm:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Las contraseñas no coinciden.")
-    
-    # Validar que el correo no exista
+
     existing = db.scalar(select(AdminUser).where(AdminUser.email == payload.email.lower()))
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este correo ya está registrado.")
-    
-    # Crear nuevo administrador
+
     admin_user = AdminUser(
         email=payload.email.lower(),
         full_name=payload.full_name,
@@ -137,7 +142,7 @@ def admin_register(payload: AdminRegisterRequest, db: Session = Depends(get_db))
     db.add(admin_user)
     db.commit()
     db.refresh(admin_user)
-    
+
     return AdminAuthResponse(
         access_token=create_access_token(admin_user.id, "admin"),
         user=AdminUserOut.model_validate(admin_user),
@@ -179,21 +184,22 @@ def resident_register(payload: ResidentRegisterRequest, db: Session = Depends(ge
     if existing_doc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Este documento ya está registrado.")
     
-    # Obtener o crear la unidad
-    try:
-        tower = db.scalar(select(Tower).where(Tower.name == payload.tower_name).limit(1))
-        if not tower:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Torre '{payload.tower_name}' no encontrada.")
-        
-        unit = db.scalar(select(Unit).where(
-            and_(Unit.tower_id == tower.id, Unit.number == payload.unit_number)
-        ))
-        if not unit:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unidad '{payload.unit_number}' en la torre '{payload.tower_name}' no encontrada.")
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
-    
-    # Crear usuario residente
+    tower = db.scalar(select(Tower).where(Tower.name == payload.tower_name).limit(1))
+    if not tower:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Torre '{payload.tower_name}' no encontrada.",
+        )
+
+    unit = db.scalar(
+        select(Unit).where(and_(Unit.tower_id == tower.id, Unit.number == payload.unit_number))
+    )
+    if not unit:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unidad '{payload.unit_number}' en la torre '{payload.tower_name}' no encontrada.",
+        )
+
     resident_user = ResidentUser(
         email=payload.email.lower(),
         full_name=payload.full_name,
@@ -309,7 +315,11 @@ def create_resident(payload: ResidentCreate, db: Session = Depends(get_db), curr
         db.add(unit)
         db.flush()
 
-    user = ResidentUser(email=payload.email.lower(), full_name=payload.full_name, password_hash=hash_password(payload.document_number))
+    user = ResidentUser(
+        email=payload.email.lower(),
+        full_name=payload.full_name,
+        password_hash=hash_password(payload.initial_password),
+    )
     resident = Resident(
         user=user,
         unit=unit,
@@ -458,6 +468,16 @@ def register_payment(payload: PaymentCreate, db: Session = Depends(get_db), curr
         raise HTTPException(status_code=404, detail="Factura no encontrada.")
     if invoice.unit_id != current_resident.unit_id:
         raise HTTPException(status_code=403, detail="No puedes pagar esta factura.")
+
+    remaining = invoice.total - invoice.paid_amount
+    if remaining <= 0:
+        raise HTTPException(status_code=400, detail="La factura ya esta pagada.")
+    if payload.amount > remaining:
+        raise HTTPException(
+            status_code=400,
+            detail=f"El pago excede el saldo pendiente ({remaining}).",
+        )
+
     payment = Payment(**payload.model_dump())
     invoice.paid_amount += payload.amount
     if invoice.paid_amount >= invoice.total:

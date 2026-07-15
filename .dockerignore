@@ -1,8 +1,13 @@
 __pycache__
 *.py[cod]
+*.egg-info
 .venv
 venv
 .env
-.env.local
+.env.*
+!.env.example
 .pytest_cache
 .mypy_cache
+.ruff_cache
+.git
+.gitignore
