@@ -2,6 +2,7 @@ from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose.exceptions import ExpiredSignatureError, JWTClaimsError, JWTError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -15,7 +16,32 @@ bearer_scheme = HTTPBearer(auto_error=False)
 def _token_from_credentials(credentials: HTTPAuthorizationCredentials | None) -> str:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Autenticacion requerida.")
-    return credentials.credentials
+    token = credentials.credentials.strip()
+    # Evita el error comun de pegar "Bearer <jwt>" completo en Authorize de Swagger.
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
+
+
+def _decode_or_401(token: str, audience: str, invalid_detail: str) -> dict:
+    try:
+        return decode_access_token(token, audience)  # type: ignore[arg-type]
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Sesion expirada. Vuelve a iniciar sesion.",
+        ) from None
+    except JWTClaimsError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                f"{invalid_detail} "
+                "Verifica que el token sea del mismo rol (admin/residente) "
+                "y no incluya el prefijo 'Bearer ' duplicado."
+            ),
+        ) from None
+    except (JWTError, ValueError, KeyError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=invalid_detail) from None
 
 
 def get_current_admin(
@@ -24,9 +50,11 @@ def get_current_admin(
 ) -> AdminUser:
     token = _token_from_credentials(credentials)
     try:
-        payload = decode_access_token(token, "admin")
+        payload = _decode_or_401(token, "admin", "Sesion administrativa invalida.")
         user_id = UUID(payload["sub"])
-    except (KeyError, ValueError):
+    except HTTPException:
+        raise
+    except (KeyError, ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesion administrativa invalida.")
 
     user = db.get(AdminUser, user_id)
@@ -41,9 +69,11 @@ def get_current_resident(
 ) -> Resident:
     token = _token_from_credentials(credentials)
     try:
-        payload = decode_access_token(token, "resident")
+        payload = _decode_or_401(token, "resident", "Sesion de residente invalida.")
         user_id = UUID(payload["sub"])
-    except (KeyError, ValueError):
+    except HTTPException:
+        raise
+    except (KeyError, ValueError, TypeError):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesion de residente invalida.")
 
     user = db.get(ResidentUser, user_id)
