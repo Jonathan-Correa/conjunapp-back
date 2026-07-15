@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 720
     allow_admin_register: bool = True
     seed_on_startup: bool = True
+    # Phase 4 integration adapters (swap without changing domain services)
+    payment_adapter: Literal["stub"] = "stub"
+    notification_adapter: Literal["logging"] = "logging"
+    access_adapter: Literal["local"] = "local"
+    image_storage_adapter: Literal["url_only", "stub"] = "url_only"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

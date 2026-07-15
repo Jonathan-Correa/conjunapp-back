@@ -241,6 +241,8 @@ class Reservation(Base, TimestampMixin):
     payment_reference: Mapped[str | None] = mapped_column(String(80))
     reject_reason: Mapped[str | None] = mapped_column(String(240))
     receipt_number: Mapped[str | None] = mapped_column(String(40), unique=True)
+    access_code: Mapped[str | None] = mapped_column(String(40), unique=True)
+    access_pin: Mapped[str | None] = mapped_column(String(12))
 
     events: Mapped[list["ReservationEvent"]] = relationship(back_populates="reservation", cascade="all, delete-orphan")
 

@@ -56,9 +56,11 @@ from app.schemas.domain import (
     AvailabilityOut,
     AvailabilitySlotOut,
     MaintenanceJobOut,
+    ReservationAccessPassOut,
     ReservationAdminOut,
     ReservationCreate,
     ReservationOut,
+    ReservationPayRequest,
     ReservationReceiptOut,
     ReservationRejectRequest,
     ReservationReschedule,
@@ -706,6 +708,7 @@ def admin_list_reservations(
             payment_reference=reservation.payment_reference,
             reject_reason=reservation.reject_reason,
             receipt_number=reservation.receipt_number,
+            access_code=reservation.access_code,
             resident_name=resident_name,
             common_area_name=area_name,
         )
@@ -866,6 +869,7 @@ def _admin_mutation(db: Session, current_admin: AdminUser, reservation_id: UUID,
         payment_reference=reservation.payment_reference,
         reject_reason=reservation.reject_reason,
         receipt_number=reservation.receipt_number,
+        access_code=reservation.access_code,
         resident_name=resident.user.full_name if resident.user else str(resident.id),
         common_area_name=area.name,
     )
@@ -942,6 +946,78 @@ def reservation_receipt(
         return ReservationReceiptOut(**build_receipt(db, reservation=reservation))
     except ReservationError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.post("/reservations/{reservation_id}/pay", response_model=ReservationOut)
+def pay_reservation_route(
+    reservation_id: UUID,
+    payload: ReservationPayRequest,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> Reservation:
+    from app.services.availability import pay_reservation
+    from app.services.reservations import ReservationError
+
+    try:
+        return pay_reservation(
+            db,
+            current_resident=current_resident,
+            reservation_id=reservation_id,
+            method=payload.method or "PSE",
+        )
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/reservations/{reservation_id}/access-pass", response_model=ReservationAccessPassOut)
+def reservation_access_pass(
+    reservation_id: UUID,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> ReservationAccessPassOut:
+    from app.services.availability import get_reservation_access_pass
+    from app.services.reservations import ReservationError
+
+    try:
+        return ReservationAccessPassOut(
+            **get_reservation_access_pass(db, current_resident=current_resident, reservation_id=reservation_id)
+        )
+    except ReservationError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+
+
+@router.get("/reservations/{reservation_id}/ical")
+def reservation_ical(
+    reservation_id: UUID,
+    db: Session = Depends(get_db),
+    current_resident: Resident = Depends(get_current_resident),
+) -> Response:
+    from app.integrations.registry import get_calendar_port
+    from app.ports import CalendarEvent
+
+    reservation = db.get(Reservation, reservation_id)
+    if reservation is None:
+        raise HTTPException(status_code=404, detail="Reserva no encontrada.")
+    if reservation.resident_id != current_resident.id:
+        raise HTTPException(status_code=403, detail="No puedes exportar esta reserva.")
+    area = db.get(CommonArea, reservation.common_area_id)
+    ical = get_calendar_port().to_ical(
+        [
+            CalendarEvent(
+                uid=f"{reservation.id}@conjunapp.local",
+                summary=f"Reserva {(area.name if area else 'zona social')}",
+                description=f"Estado: {reservation.status.value}",
+                starts_at=reservation.starts_at,
+                ends_at=reservation.ends_at,
+                location=area.name if area else "",
+            )
+        ]
+    )
+    return Response(
+        content=ical,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="reserva-{reservation_id}.ics"'},
+    )
 
 
 @router.patch("/reservations/{reservation_id}/cancel", response_model=ReservationOut)

@@ -256,6 +256,7 @@ class ReservationOut(ORMModel):
     payment_reference: str | None
     reject_reason: str | None = None
     receipt_number: str | None = None
+    access_code: str | None = None
 
 
 class ReservationAdminOut(ReservationOut):
@@ -265,6 +266,20 @@ class ReservationAdminOut(ReservationOut):
 
 class ReservationRejectRequest(BaseModel):
     reason: str = ""
+
+
+class ReservationPayRequest(BaseModel):
+    method: str = "PSE"
+
+
+class ReservationAccessPassOut(BaseModel):
+    reservation_id: UUID
+    code: str
+    kind: str
+    pin: str | None = None
+    provider: str
+    expires_at: datetime
+    status: str
 
 
 class ReservationReceiptOut(BaseModel):
